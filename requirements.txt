@@ -1,0 +1,6 @@
+transformers>=4.42
+torch>=2.2
+pandas>=2.2
+tqdm>=4.66
+python-dotenv>=1.0
+pymongo[srv]>=4.7      # remove if you won’t use MongoDB
