@@ -1,6 +1,6 @@
-transformers>=4.42
-torch>=2.2
-pandas>=2.2
-tqdm>=4.66
-python-dotenv>=1.0
-pymongo[srv]>=4.7      # remove if you won’t use MongoDB
+datasets>=2.18
+transformers>=4.41
+torch>=2.3
+scikit-learn>=1.5
+pandas
+tqdm
