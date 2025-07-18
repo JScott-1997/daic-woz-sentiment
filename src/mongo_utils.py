@@ -1,18 +1,14 @@
-from pymongo import MongoClient
-from .config import MONGO_URI, DB_NAME, COLL_NAME
+"""
+mongo_utils.py  – stub version
 
-client = None
-collection = None
+In the no-DB workflow we don’t want to install or connect to MongoDB.
+`insert_doc` is kept so other modules can import it without changes.
 
-def get_collection():
-    global client, collection
-    if MONGO_URI and collection is None:
-        client = MongoClient(MONGO_URI)
-        collection = client[DB_NAME][COLL_NAME]
-    return collection
+If you later decide to use Mongo, replace this file with the original
+implementation that creates a `MongoClient` and performs inserts.
+"""
 
 
-def insert_doc(doc: dict):
-    coll = get_collection()
-    if coll:
-        coll.insert_one(doc)
+def insert_doc(*_, **__):
+    """Dummy function that does nothing."""
+    return
