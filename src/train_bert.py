@@ -17,6 +17,7 @@ Outputs
 from __future__ import annotations
 
 import pathlib
+from pathlib import Path
 from dataclasses import dataclass
 
 import evaluate
@@ -30,6 +31,10 @@ from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
 DATA_F = pathlib.Path("processed/bert/utterances_daic.jsonl")
 OUT_DIR = pathlib.Path("processed/bert/distilbert_daic_best")
 MODEL_NAME = "distilbert-base-uncased"
+DATA_DIR = Path("processed/bert")
+train_file = DATA_DIR / "train.jsonl"
+val_file   = DATA_DIR / "val.jsonl"
+
 
 # ─────────────────── 1. load dataset  ────────────────────────────────────
 ds: Dataset = load_dataset("json", data_files=str(DATA_F), split="train")

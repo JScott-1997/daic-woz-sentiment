@@ -1,83 +1,105 @@
-"""
-prep_daic_to_hf.py
-────────────────────────────────────────────────────────────────────────────
-• Build a JSON‑lines file with one record per utterance:
-      {"text": "...", "label": 0/1}
-  label = 1  ⇢  participant PHQ‑8 ≥ 10  (clinical depression)
-  label = 0  ⇢  PHQ‑8 < 10
-
-The script expects:
-    processed/transcripts_with_sentiment/*_sentiment.csv
-    data/labels/*_split_Depression_AVEC2017.csv
-and writes:
-    processed/bert/utterances_daic.jsonl
-"""
-
+# prep_daic_to_hf.py  – robust session‑split builder
 from __future__ import annotations
 
-import glob
-import json  # noqa: F401  (kept for completeness if you want manual writes)
-import re
+import argparse
+import json
+import random
 from pathlib import Path
 
 import pandas as pd
 from tqdm import tqdm
 
-# ───────────────────────── paths ─────────────────────────────────────────
+# ───────── paths ────────────────────────────────────────────────────────
 TRANS_DIR = Path("processed/transcripts_with_sentiment")
-LABEL_DIR = Path("data/labels")
-OUT_DIR = Path("processed/bert")
+LABEL_DIR = Path("data/labels")            # holds *_split_Depression_AVEC2017.csv
+OUT_DIR   = Path("processed/bert")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ─────────────────── build session‑level label map ───────────────────────
-digit_re = re.compile(r"\d+")
-labels: dict[int, int] = {}
+# ───────── cli ──────────────────────────────────────────────────────────
+ap = argparse.ArgumentParser()
+ap.add_argument("--split", choices=["official", "random", "strat"],
+               default="official")
+ap.add_argument("--train-frac", type=float, default=0.8)
+ap.add_argument("--val-frac",   type=float, default=0.1)
+ap.add_argument("--seed",       type=int,   default=42)
+args = ap.parse_args()
+random.seed(args.seed)
 
-for lf in LABEL_DIR.glob("*_split_Depression_AVEC2017.csv"):
-    if "test_split" in lf.name.lower():  # blind test set → skip
-        continue
-    df = pd.read_csv(lf, sep=None, engine="python")
-    df.columns = [c.lower() for c in df.columns]  # standardise
+# ───────── load PHQ labels (headers made safe) ──────────────────────────
+label_csvs = list(LABEL_DIR.glob("*_split_Depression_AVEC2017.csv"))
+if not label_csvs:
+    raise RuntimeError(f"No *_split_Depression_AVEC2017.csv found in {LABEL_DIR}")
 
-    if not {"participant_id", "phq8_score"}.issubset(df.columns):
-        raise ValueError(f"Unexpected columns in {lf}: {df.columns}")
+def _clean(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = df.columns.str.strip().str.lower()          # tidy headers
+    return df
 
-    for pid, score in zip(df["participant_id"], df["phq8_score"]):
-        labels[int(pid)] = int(score >= 10)
+phq_df = pd.concat(_clean(pd.read_csv(f)) for f in label_csvs)
 
-print(f"Loaded PHQ‑8 labels for {len(labels)} participants")
+# force numeric, NaN → -1
+phq_df["phq8_score"] = pd.to_numeric(phq_df["phq8_score"], errors="coerce").fillna(-1)
 
-# ─────────────────── iterate over sentiment CSVs ─────────────────────────
-rows: list[dict[str, str | int]] = []
+phq_map = dict(zip(phq_df["participant_id"].astype(int), phq_df["phq8_score"].astype(int)))
 
-csv_files = sorted(TRANS_DIR.glob("*_sentiment.csv"))
-if not csv_files:
-    raise RuntimeError(f"No *_sentiment.csv files found in {TRANS_DIR}")
+print(f"Loaded PHQ table: {len(phq_map)} sessions "
+      f"({sum(s>=10 for s in phq_map.values())} positives)")
 
-for csv_path in tqdm(csv_files, desc="Utterances"):
-    m = digit_re.search(csv_path.name)
-    if not m:
-        continue  # filename without digits – should not happen
-    session_id = int(m.group())
-    label = labels.get(session_id)
-    if label is None:
-        # transcript without PHQ‑8 label (e.g., test split); skip
-        continue
+# ───────── helper to extract session ID from filename ───────────────────
+def sid_from_path(p: Path) -> int:
+    # 300_TRANSCRIPT_sentiment.csv → 300
+    return int(p.stem.split("_")[0])
 
-    df = pd.read_csv(csv_path)
-    txt_col = next(
-        (c for c in df.columns if c.lower() in {"utterance", "value", "text"}), None
-    )
-    if txt_col is None:
-        raise KeyError(f"No utterance column in {csv_path}")
+# ───────── build utterance records ──────────────────────────────────────
+records = []
+for csv_f in tqdm(sorted(TRANS_DIR.glob("*_sentiment.csv")), desc="Utterances"):
+    sid = sid_from_path(csv_f)
+    df  = pd.read_csv(csv_f)
 
-    for text in df[txt_col].astype(str):
-        text = text.strip()
-        if text:  # ignore empty lines
-            rows.append({"text": text, "label": label})
+    col_text = "Utterance" if "Utterance" in df.columns else "value"
+    for txt, sent in zip(df[col_text].astype(str), df["Sentiment"]):
+        records.append({
+            "text":   txt,
+            "label":  1 if sent == "POSITIVE" else 0,
+            "session": sid,
+            "phq":    phq_map.get(sid, -1),
+        })
 
-# ─────────────────────────  write jsonl  ─────────────────────────────────
-out_file = OUT_DIR / "utterances_daic.jsonl"
-pd.DataFrame(rows).to_json(out_file, orient="records", lines=True)
+all_sids = sorted({r["session"] for r in records})
 
-print(f"Saved {len(rows):,} utterances → {out_file}")
+# ───────── define train/val/test splits ─────────────────────────────────
+def split_random(stratified: bool):
+    pos = [s for s in all_sids if phq_map.get(s, -1) >= 10]
+    neg = [s for s in all_sids if phq_map.get(s, -1) < 10]
+
+    def _cut(lst):
+        n_tr = int(len(lst) * args.train_frac)
+        n_va = int(len(lst) * args.val_frac)
+        return set(lst[:n_tr]), set(lst[n_tr:n_tr+n_va]), set(lst[n_tr+n_va:])
+
+    if stratified:
+        random.shuffle(pos); random.shuffle(neg)
+        tr_p, va_p, te_p = _cut(pos)
+        tr_n, va_n, te_n = _cut(neg)
+        return tr_p|tr_n, va_p|va_n, te_p|te_n
+    else:
+        both = pos + neg
+        random.shuffle(both)
+        return _cut(both)
+
+if args.split == "official":
+    train_ids = set(pd.read_csv(LABEL_DIR/"train_split_Depression_AVEC2017.csv")["Participant_ID"])
+    val_ids   = set(pd.read_csv(LABEL_DIR/"dev_split_Depression_AVEC2017.csv")["Participant_ID"])
+    test_ids  = set(pd.read_csv(LABEL_DIR/"test_split_Depression_AVEC2017.csv")["Participant_ID"])
+else:
+    train_ids, val_ids, test_ids = split_random(args.split == "strat")
+
+splits = {"train": train_ids, "val": val_ids, "test": test_ids}
+
+# ───────── dump JSONL files ─────────────────────────────────────────────
+for name, ids in splits.items():
+    out_f = OUT_DIR / f"{name}.jsonl"
+    with out_f.open("w", encoding="utf-8") as fp:
+        for r in records:
+            if r["session"] in ids:
+                fp.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"{name:<5} {len(ids):3} sessions → {out_f}")
